@@ -1,0 +1,24 @@
+seed: 42
+
+data:
+  train_csv: data/processed/protein_type_train.csv
+  val_fraction: 0.2
+  synthetic_samples: 1200
+  synthetic_min_length: 60
+  synthetic_max_length: 256
+
+model:
+  max_length: 256
+  embedding_dim: 128
+  num_heads: 4
+  num_layers: 2
+  ff_dim: 256
+  dropout: 0.1
+  num_classes: 5
+
+training:
+  batch_size: 32
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  epochs: 6
+  output_dir: checkpoints/protein_type

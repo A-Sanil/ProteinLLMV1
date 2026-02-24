@@ -1,0 +1,22 @@
+{
+  "input_file": "/Users/aadityasanil/Desktop/ProteinLLMV1/data/raw/proteinatlas/proteinatlas.tsv.zip",
+  "rows_total": 19300,
+  "selected_classes": [
+    "Predicted intracellular proteins",
+    "Predicted intracellular proteins, Transcription factors",
+    "Disease related genes, Human disease related genes, Predicted intracellular proteins",
+    "Predicted membrane proteins",
+    "Essential proteins, Predicted intracellular proteins"
+  ],
+  "label_map": {
+    "0": "Predicted intracellular proteins",
+    "1": "Predicted intracellular proteins, Transcription factors",
+    "2": "Disease related genes, Human disease related genes, Predicted intracellular proteins",
+    "3": "Predicted membrane proteins",
+    "4": "Essential proteins, Predicted intracellular proteins"
+  },
+  "samples_per_class_target": 180,
+  "rows_output": 900,
+  "skipped_no_sequence": 0,
+  "seed": 42
+}
