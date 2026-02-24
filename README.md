@@ -249,14 +249,6 @@ Contributions are welcome! Please:
 
 ---
 
-## 📧 Contact
-
-**Project Lead**: [Your Name]  
-**Email**: [your.email@example.com]  
-**GitHub**: [@yourusername](https://github.com/yourusername)
-
----
-
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

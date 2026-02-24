@@ -787,11 +787,6 @@ ProteinLLMV1/
 - Biopython: https://biopython.org/
 - Shadcn UI: https://ui.shadcn.com/
 
-### Contact & Collaboration
-- Project Lead: [Your Name]
-- Email: [Your Email]
-- GitHub: [Your GitHub]
-
 ---
 
 **Last Updated**: February 20, 2026
