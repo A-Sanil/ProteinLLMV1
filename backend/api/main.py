@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -9,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from ml.basic_protein_model import BasicProteinClassifier
@@ -19,6 +21,10 @@ try:
     from Bio.Align import substitution_matrices
 except Exception:
     substitution_matrices = None
+  warnings.warn(
+    "Biopython is unavailable; BLOSUM62 scores will fall back to a simple identity matrix.",
+    RuntimeWarning,
+  )
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -34,9 +40,15 @@ class PredictRequest(BaseModel):
 
 class ModelBundle:
     def __init__(self):
+        if not CHECKPOINT_PATH.exists():
+            raise FileNotFoundError(f"Missing model checkpoint: {CHECKPOINT_PATH}")
+
         checkpoint = torch.load(str(CHECKPOINT_PATH), map_location="cpu")
-        config = checkpoint["config"]
-        model_cfg = config["model"]
+        try:
+            config = checkpoint["config"]
+            model_cfg = config["model"]
+        except KeyError as exc:
+            raise RuntimeError(f"Invalid checkpoint format: {CHECKPOINT_PATH}") from exc
 
         self.tokenizer = ProteinTokenizer(max_length=model_cfg["max_length"])
         self.model = BasicProteinClassifier(
@@ -58,7 +70,12 @@ class ModelBundle:
 
         if TYPE_CHECKPOINT_PATH.exists() and TYPE_LABEL_MAP_PATH.exists():
             type_checkpoint = torch.load(str(TYPE_CHECKPOINT_PATH), map_location="cpu")
-            type_cfg = type_checkpoint["config"]["model"]
+            try:
+                type_cfg = type_checkpoint["config"]["model"]
+                raw_label_map = json.loads(TYPE_LABEL_MAP_PATH.read_text(encoding="utf-8"))
+            except KeyError as exc:
+                raise RuntimeError(f"Invalid type checkpoint metadata: {TYPE_CHECKPOINT_PATH}") from exc
+
             self.type_model = BasicProteinClassifier(
                 vocab_size=len(self.tokenizer.vocab.token_to_idx),
                 max_length=type_cfg["max_length"],
@@ -73,7 +90,6 @@ class ModelBundle:
             self.type_model.load_state_dict(type_checkpoint["model_state_dict"])
             self.type_model.eval()
 
-            raw_label_map = json.loads(TYPE_LABEL_MAP_PATH.read_text(encoding="utf-8"))
             self.type_label_map = {int(idx): name for idx, name in raw_label_map.items()}
 
 
@@ -94,17 +110,23 @@ def build_blosum_matrix(sequence: str) -> Dict[str, List]:
         scores = [[1 if i == j else 0 for j in range(size)] for i in range(size)]
         return {"residues": residues, "scores": scores}
 
-    blosum62 = substitution_matrices.load("BLOSUM62")
+    try:
+        blosum62 = substitution_matrices.load("BLOSUM62")
+    except Exception:
+        size = len(residues)
+        scores = [[1 if i == j else 0 for j in range(size)] for i in range(size)]
+        return {"residues": residues, "scores": scores}
+
     scores = []
     for a in residues:
         row = []
         for b in residues:
             try:
                 value = blosum62[(a, b)]
-            except Exception:
+          except KeyError:
                 try:
                     value = blosum62[(b, a)]
-                except Exception:
+            except KeyError:
                     value = -4
             row.append(int(value))
         scores.append(row)
@@ -113,6 +135,17 @@ def build_blosum_matrix(sequence: str) -> Dict[str, List]:
 
 
 app = FastAPI(title="ProteinLLMV1 Demo")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+def startup_check() -> None:
+    get_model_bundle()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -294,7 +327,19 @@ def predict(payload: PredictRequest):
         raise HTTPException(status_code=400, detail="Sequence is required")
 
     bundle = get_model_bundle()
-    input_ids = torch.tensor([bundle.tokenizer.encode(sequence)], dtype=torch.long)
+    cleaned_sequence = bundle.tokenizer.clean_sequence(sequence)
+    if not cleaned_sequence:
+        raise HTTPException(status_code=400, detail="Sequence must contain amino acid letters")
+    if len(cleaned_sequence) > bundle.tokenizer.max_length:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Sequence is too long for this model. "
+                f"Maximum length is {bundle.tokenizer.max_length} amino acids."
+            ),
+        )
+
+    input_ids = torch.tensor([bundle.tokenizer.encode(cleaned_sequence)], dtype=torch.long)
 
     with torch.no_grad():
         logits = bundle.model(input_ids)
@@ -308,24 +353,24 @@ def predict(payload: PredictRequest):
 
     protein_type_prediction = None
     if bundle.type_model is not None and bundle.type_label_map:
-      with torch.no_grad():
-        type_logits = bundle.type_model(input_ids)
-        type_probs = F.softmax(type_logits, dim=-1).squeeze(0)
-      type_pred_idx = int(torch.argmax(type_probs).item())
-      type_class_probs = {
-        bundle.type_label_map.get(i, str(i)): float(type_probs[i].item())
-        for i in range(type_probs.shape[0])
-      }
-      protein_type_prediction = {
-        "predicted_label": bundle.type_label_map.get(type_pred_idx, str(type_pred_idx)),
-        "confidence": float(type_probs[type_pred_idx].item()),
-        "class_probabilities": type_class_probs,
-      }
+        with torch.no_grad():
+            type_logits = bundle.type_model(input_ids)
+            type_probs = F.softmax(type_logits, dim=-1).squeeze(0)
+        type_pred_idx = int(torch.argmax(type_probs).item())
+        type_class_probs = {
+            bundle.type_label_map.get(i, str(i)): float(type_probs[i].item())
+            for i in range(type_probs.shape[0])
+        }
+        protein_type_prediction = {
+            "predicted_label": bundle.type_label_map.get(type_pred_idx, str(type_pred_idx)),
+            "confidence": float(type_probs[type_pred_idx].item()),
+            "class_probabilities": type_class_probs,
+        }
 
     return {
         "predicted_label": LABEL_MAP.get(pred_idx, str(pred_idx)),
         "confidence": float(probs[pred_idx].item()),
         "class_probabilities": class_probs,
-      "protein_type_prediction": protein_type_prediction,
+        "protein_type_prediction": protein_type_prediction,
         "blosum_matrix": build_blosum_matrix(sequence),
     }

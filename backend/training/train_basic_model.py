@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 from typing import Any, Dict
 
+import numpy as np
 import torch
 import torch.nn as nn
 import yaml
@@ -20,9 +22,46 @@ from training.dataset import (
 )
 
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+
+def resolve_path(path_value: str | Path, base_dir: Path = BACKEND_DIR) -> Path:
+    path = Path(path_value)
+    if path.is_absolute() or path.exists():
+        return path
+    return base_dir / path
+
+
+def validate_config(config: Dict[str, Any]) -> None:
+    required_sections = {"data", "model", "training", "seed"}
+    missing_sections = sorted(required_sections - set(config))
+    if missing_sections:
+        raise ValueError(f"Missing required config sections: {missing_sections}")
+
+    required_keys = {
+        "data": ["train_csv", "val_fraction", "synthetic_samples", "synthetic_min_length", "synthetic_max_length"],
+        "model": ["max_length", "embedding_dim", "num_heads", "num_layers", "ff_dim", "dropout", "num_classes"],
+        "training": ["batch_size", "learning_rate", "weight_decay", "epochs", "output_dir"],
+    }
+    for section, keys in required_keys.items():
+        section_cfg = config.get(section, {})
+        missing_keys = [key for key in keys if key not in section_cfg]
+        if missing_keys:
+            raise ValueError(f"Missing required {section} config keys: {missing_keys}")
+
+
 def load_config(config_path: Path) -> Dict[str, Any]:
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
     with config_path.open("r", encoding="utf-8") as file:
-        return yaml.safe_load(file)
+        config = yaml.safe_load(file)
+
+    if not isinstance(config, dict):
+        raise ValueError(f"Config file must contain a mapping: {config_path}")
+
+    validate_config(config)
+    return config
 
 
 def create_datasets(config: Dict[str, Any], tokenizer: ProteinTokenizer, synthetic: bool):
@@ -35,7 +74,7 @@ def create_datasets(config: Dict[str, Any], tokenizer: ProteinTokenizer, synthet
             seed=config["seed"],
         )
     else:
-        examples = load_examples_from_csv(Path(data_cfg["train_csv"]))
+        examples = load_examples_from_csv(resolve_path(data_cfg["train_csv"]))
 
     dataset = ProteinSequenceDataset(examples=examples, tokenizer=tokenizer)
     return split_dataset(dataset, val_fraction=data_cfg["val_fraction"], seed=config["seed"])
@@ -66,8 +105,13 @@ def evaluate(model, dataloader, loss_fn, device):
 
 
 def train(config_path: Path, synthetic: bool):
-    config = load_config(config_path)
-    torch.manual_seed(config["seed"])
+    config = load_config(resolve_path(config_path))
+    seed = int(config["seed"])
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     training_cfg = config["training"]
     model_cfg = config["model"]
@@ -108,7 +152,7 @@ def train(config_path: Path, synthetic: bool):
     )
     loss_fn = nn.CrossEntropyLoss()
 
-    output_dir = Path(training_cfg["output_dir"])
+    output_dir = resolve_path(training_cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")

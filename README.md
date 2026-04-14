@@ -17,7 +17,7 @@ Open http://127.0.0.1:8000
 
 ## Training Data
 
-- 900+ organism sequences from UniProt
+- 3,000+ organism sequences from UniProt
 - 3,830 protein sequences from Human Protein Atlas v25
 
 ## Model

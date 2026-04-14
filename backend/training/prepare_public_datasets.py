@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import time
 import random
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+BACKEND_DIR = ROOT_DIR / "backend"
+MAX_RETRIES = 3
 
 
 @dataclass(frozen=True)
@@ -56,8 +63,20 @@ def fetch_sequences_from_uniprot(organism_id: int, size: int) -> List[str]:
             "offset": str(offset),
         }
         url = "https://rest.uniprot.org/uniprotkb/search?" + urllib.parse.urlencode(params)
-        with urllib.request.urlopen(url, timeout=60) as response:
-            fasta_text = response.read().decode("utf-8")
+
+        fasta_text = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    fasta_text = response.read().decode("utf-8")
+                break
+            except (urllib.error.HTTPError, urllib.error.URLError):
+                if attempt == MAX_RETRIES:
+                    raise
+                time.sleep(2 ** (attempt - 1))
+
+        if fasta_text is None:
+            raise RuntimeError(f"Failed to fetch sequences for organism {organism_id}")
 
         sequences = parse_fasta_sequences(fasta_text)
         if not sequences:
@@ -97,12 +116,12 @@ def write_csv(rows: List[Dict[str, object]], output_csv: Path) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Prepare small public protein datasets")
-    parser.add_argument("--samples-per-source", type=int, default=120)
+    parser.add_argument("--samples-per-source", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output-csv",
         type=str,
-        default="data/processed/train_sequences.csv",
+        default=str(BACKEND_DIR / "data" / "processed" / "train_sequences.csv"),
         help="CSV path relative to backend/",
     )
     return parser.parse_args()
@@ -112,6 +131,8 @@ def main():
     args = parse_args()
     rows, counts = build_dataset(samples_per_source=args.samples_per_source, seed=args.seed)
     output_csv = Path(args.output_csv)
+    if not output_csv.is_absolute():
+        output_csv = BACKEND_DIR / output_csv
     write_csv(rows=rows, output_csv=output_csv)
 
     print(f"Wrote dataset: {output_csv}")
