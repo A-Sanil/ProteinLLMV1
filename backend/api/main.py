@@ -34,6 +34,7 @@ TYPE_CHECKPOINT_PATH = BACKEND_DIR / "checkpoints" / "protein_type" / "basic_pro
 TYPE_LABEL_MAP_PATH = BACKEND_DIR / "data" / "processed" / "protein_type_label_map.json"
 LABEL_MAP = {0: "human_swissprot", 1: "yeast_swissprot", 2: "ecoli_swissprot"}
 APP_TITLE = "ProteinLLMV1 Demo"
+MAX_BLOSUM_DISPLAY_RESIDUES = 80
 
 
 class PredictRequest(BaseModel):
@@ -176,24 +177,44 @@ def get_model_bundle() -> ModelBundle:
     return ModelBundle()
 
 
-def build_blosum_matrix(sequence: str) -> Dict[str, List]:
+def build_blosum_matrix(sequence: str, max_residues: int = MAX_BLOSUM_DISPLAY_RESIDUES) -> Dict[str, object]:
     clean_seq = "".join(ch for ch in sequence.upper() if ch.isalpha())
     if not clean_seq:
-        return {"residues": [], "scores": []}
+        return {
+            "residues": [],
+            "scores": [],
+            "full_length": 0,
+            "displayed_length": 0,
+            "truncated": False,
+        }
 
-    residues = list(clean_seq)
+    full_length = len(clean_seq)
+    display_seq = clean_seq[:max_residues]
+    residues = list(display_seq)
 
     if substitution_matrices is None:
         size = len(residues)
         scores = [[1 if i == j else 0 for j in range(size)] for i in range(size)]
-        return {"residues": residues, "scores": scores}
+        return {
+            "residues": residues,
+            "scores": scores,
+            "full_length": full_length,
+            "displayed_length": len(residues),
+            "truncated": full_length > len(residues),
+        }
 
     try:
         blosum62 = substitution_matrices.load("BLOSUM62")
     except Exception:
         size = len(residues)
         scores = [[1 if i == j else 0 for j in range(size)] for i in range(size)]
-        return {"residues": residues, "scores": scores}
+        return {
+            "residues": residues,
+            "scores": scores,
+            "full_length": full_length,
+            "displayed_length": len(residues),
+            "truncated": full_length > len(residues),
+        }
 
     scores = []
     for a in residues:
@@ -209,7 +230,13 @@ def build_blosum_matrix(sequence: str) -> Dict[str, List]:
             row.append(int(value))
         scores.append(row)
 
-    return {"residues": residues, "scores": scores}
+    return {
+      "residues": residues,
+      "scores": scores,
+      "full_length": full_length,
+      "displayed_length": len(residues),
+      "truncated": full_length > len(residues),
+    }
 
 
 app = FastAPI(title=APP_TITLE)
@@ -240,6 +267,7 @@ def api_meta() -> Dict[str, object]:
         "organism_classes": list(LABEL_MAP.values()),
         "protein_type_model": bundle.type_model is not None,
         "max_sequence_length": bundle.tokenizer.max_length,
+    "max_blosum_display_residues": MAX_BLOSUM_DISPLAY_RESIDUES,
         "features": [
             "organism_classification",
             "protein_type_baseline",
@@ -468,7 +496,7 @@ def index() -> str:
 
       function debouncePredict() {
         if (predictTimer) clearTimeout(predictTimer);
-        predictTimer = setTimeout(runPrediction, 450);
+        predictTimer = setTimeout(runPrediction, 650);
       }
 
       async function runPrediction() {
@@ -479,18 +507,32 @@ def index() -> str:
         }
         setStatus('Running prediction...');
 
-        const res = await fetch('/predict', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ sequence })
-        });
+        const start = performance.now();
+        let data;
+        try {
+          const res = await fetch('/predict', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ sequence })
+          });
 
-        if (!res.ok) {
-          setStatus('Prediction failed.');
+          if (!res.ok) {
+            let detail = 'Prediction failed.';
+            try {
+              const err = await res.json();
+              if (err && err.detail) detail = err.detail;
+            } catch (_) {
+              // Fall back to default error text if JSON parsing fails.
+            }
+            setStatus(detail);
+            return;
+          }
+
+          data = await res.json();
+        } catch (err) {
+          setStatus('Prediction failed: could not reach backend.');
           return;
         }
-
-        const data = await res.json();
 
         const probs = Object.entries(data.class_probabilities)
           .sort((a,b) => b[1] - a[1])
@@ -531,11 +573,18 @@ def index() -> str:
           html += '</tr>';
         }
         html += '</table>';
+
+        if (data.blosum_matrix.truncated) {
+          html = `
+            <p class="muted">Matrix limited to first ${data.blosum_matrix.displayed_length} residues (input length: ${data.blosum_matrix.full_length}) for performance.</p>
+          ` + html;
+        }
+
         document.getElementById('matrix').innerHTML = html;
-        setStatus('Prediction complete.');
+        const elapsedMs = Math.round(performance.now() - start);
+        setStatus(`Prediction complete in ${elapsedMs} ms.`);
       }
 
-      document.getElementById('seq').addEventListener('input', debouncePredict);
       document.getElementById('seq').addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
           runPrediction();
