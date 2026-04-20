@@ -50,6 +50,34 @@ class PredictRequest(BaseModel):
     sequence: str
 
 
+class StructureRequest(BaseModel):
+  sequence: str
+
+
+class ESMFoldPredictor:
+  def __init__(self) -> None:
+    try:
+      import esm
+    except Exception as exc:
+      raise RuntimeError(
+        "ESMFold dependency is unavailable. Install fair-esm and compatible torch wheels."
+      ) from exc
+
+    self._device = "cuda" if torch.cuda.is_available() else "cpu"
+    self._model = esm.pretrained.esmfold_v1()
+    self._model.eval()
+    if self._device == "cuda":
+      self._model = self._model.cuda()
+
+  @property
+  def device(self) -> str:
+    return self._device
+
+  def predict_pdb(self, sequence: str) -> str:
+    with torch.no_grad():
+      return self._model.infer_pdb(sequence)
+
+
 class HeuristicProteinClassifier(nn.Module):
   def __init__(self, num_classes: int, pad_id: int, token_to_idx: Dict[str, int], max_length: int):
     super().__init__()
@@ -186,6 +214,11 @@ def get_model_bundle() -> ModelBundle:
     return ModelBundle()
 
 
+@lru_cache(maxsize=1)
+def get_structure_predictor() -> ESMFoldPredictor:
+  return ESMFoldPredictor()
+
+
 def build_blosum_matrix(sequence: str, max_residues: int = MAX_BLOSUM_DISPLAY_RESIDUES) -> Dict[str, object]:
     clean_seq = "".join(ch for ch in sequence.upper() if ch.isalpha())
     if not clean_seq:
@@ -319,6 +352,51 @@ def compute_protein_traits(sequence: str) -> Dict[str, object]:
     return traits
 
 
+def summarize_pdb(pdb_text: str) -> Dict[str, object]:
+    atom_lines = [line for line in pdb_text.splitlines() if line.startswith("ATOM")]
+    if not atom_lines:
+        return {
+            "atom_count": 0,
+            "residue_count": 0,
+            "chain_count": 0,
+            "chains": [],
+            "mean_plddt": None,
+            "min_plddt": None,
+            "max_plddt": None,
+        }
+
+    residues = set()
+    chains = set()
+    ca_bfactors: List[float] = []
+
+    for line in atom_lines:
+        chain_id = line[21].strip() or "A"
+        res_seq = line[22:26].strip()
+        res_name = line[17:20].strip()
+        atom_name = line[12:16].strip()
+
+        chains.add(chain_id)
+        residues.add((chain_id, res_seq, res_name))
+
+        if atom_name == "CA":
+            try:
+                ca_bfactors.append(float(line[60:66].strip()))
+            except ValueError:
+                pass
+
+    mean_plddt = sum(ca_bfactors) / len(ca_bfactors) if ca_bfactors else None
+
+    return {
+        "atom_count": len(atom_lines),
+        "residue_count": len(residues),
+        "chain_count": len(chains),
+        "chains": sorted(chains),
+        "mean_plddt": _safe_round(mean_plddt, 2) if mean_plddt is not None else None,
+        "min_plddt": _safe_round(min(ca_bfactors), 2) if ca_bfactors else None,
+        "max_plddt": _safe_round(max(ca_bfactors), 2) if ca_bfactors else None,
+    }
+
+
 app = FastAPI(title=APP_TITLE)
 app.add_middleware(
     CORSMiddleware,
@@ -341,20 +419,68 @@ def health() -> Dict[str, str]:
 @app.get("/api/meta")
 def api_meta() -> Dict[str, object]:
     bundle = get_model_bundle()
+    structure_available = True
+    try:
+        _ = get_structure_predictor()
+    except Exception:
+        structure_available = False
+
     return {
         "app": APP_TITLE,
-    "model_source": bundle.source,
+        "model_source": bundle.source,
         "organism_classes": list(LABEL_MAP.values()),
         "protein_type_model": bundle.type_model is not None,
+        "structure_model": "esmfold_v1" if structure_available else None,
+        "structure_prediction_available": structure_available,
         "max_sequence_length": bundle.tokenizer.max_length,
-    "max_blosum_display_residues": MAX_BLOSUM_DISPLAY_RESIDUES,
+        "max_blosum_display_residues": MAX_BLOSUM_DISPLAY_RESIDUES,
         "features": [
             "organism_classification",
             "protein_type_baseline",
-      "protein_trait_analysis",
+            "protein_trait_analysis",
+            "esmfold_structure_prediction",
             "blosum62_visualization",
             "fastapi_inference",
         ],
+    }
+
+
+@app.post("/predict_structure")
+def predict_structure(payload: StructureRequest):
+    sequence = payload.sequence.strip().upper()
+    if not sequence:
+        raise HTTPException(status_code=400, detail="Sequence is required")
+
+    bundle = get_model_bundle()
+    cleaned_sequence = bundle.tokenizer.clean_sequence(sequence)
+    if not cleaned_sequence:
+        raise HTTPException(status_code=400, detail="Sequence must contain amino acid letters")
+
+    predictor: ESMFoldPredictor
+    try:
+        predictor = get_structure_predictor()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "ESMFold is not available in this environment. "
+                "Install fair-esm with compatible dependencies to enable structure prediction."
+            ),
+        ) from exc
+
+    try:
+        pdb_text = predictor.predict_pdb(cleaned_sequence)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"ESMFold prediction failed: {exc}") from exc
+
+    return {
+        "model": "esmfold_v1",
+        "device": predictor.device,
+        "sequence_length": len(cleaned_sequence),
+        "summary": summarize_pdb(pdb_text),
+        "protein_traits": compute_protein_traits(cleaned_sequence),
+        "pdb_text": pdb_text,
+        "filename": "esmfold_prediction.pdb",
     }
 
 
@@ -467,6 +593,21 @@ def index() -> str:
       table { border-collapse: collapse; font-size: 12px; width: 100%; overflow: hidden; }
       td, th { border: 1px solid rgba(148, 163, 184, 0.18); padding: 4px 6px; text-align: center; }
       th { background: rgba(15, 23, 42, 0.86); }
+      .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+      .tab-btn {
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 1px solid var(--panel-border);
+        background: rgba(15, 23, 42, 0.8);
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .tab-btn.active {
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        border-color: transparent;
+      }
+      .hidden { display: none; }
       @media (max-width: 860px) {
         .hero, .grid { grid-template-columns: 1fr; }
         .stat-grid { grid-template-columns: 1fr; }
@@ -517,12 +658,19 @@ def index() -> str:
         </div>
       </section>
 
-      <div class="grid">
+      <div class="tabs">
+        <button id="tab-classification" class="tab-btn active" onclick="setTab('classification')">Classification + Traits</button>
+        <button id="tab-structure" class="tab-btn" onclick="setTab('structure')">Structure + Traits</button>
+      </div>
+
+      <div id="classification-panel" class="grid">
         <div>
           <div class="card">
             <label for="seq">Protein Sequence</label>
             <textarea id="seq">EGH</textarea>
             <div class="row">
+              <button onclick="runPrediction()">Predict Sequence</button>
+              <button class="secondary" onclick="runStructurePrediction()">Predict Structure</button>
               <span class="chip" onclick="setExample('EGH')">Example 1</span>
               <span class="chip" onclick="setExample('MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPIL')">Example 2</span>
               <span class="chip" onclick="setExample('MALWMRLLPLLALLALWGPDPAAA')">Example 3</span>
@@ -542,13 +690,46 @@ def index() -> str:
           <div id="matrix"></div>
         </div>
       </div>
+
+      <div id="structure-panel" class="card hidden">
+        <h3>ESMFold Structure Prediction</h3>
+        <p class="muted">Runs ESMFold and reports PDB summary statistics and trait metrics for the same sequence.</p>
+        <div class="row">
+          <button onclick="runStructurePrediction()">Run ESMFold</button>
+          <button id="download-pdb" class="secondary" onclick="downloadPdb()" disabled>Download PDB</button>
+        </div>
+        <div id="structure-summary" class="muted" style="margin-top:10px;">No structure prediction yet.</div>
+        <div id="structure-traits" style="margin-top: 14px;"></div>
+      </div>
     </div>
 
     <script>
       let predictTimer = null;
+      let currentTab = 'classification';
+      let latestPdbText = null;
 
       function setStatus(text) {
         document.getElementById('status').textContent = text;
+      }
+
+      function setTab(tabName) {
+        currentTab = tabName;
+        const classificationPanel = document.getElementById('classification-panel');
+        const structurePanel = document.getElementById('structure-panel');
+        const tabClassification = document.getElementById('tab-classification');
+        const tabStructure = document.getElementById('tab-structure');
+
+        if (tabName === 'structure') {
+          classificationPanel.classList.add('hidden');
+          structurePanel.classList.remove('hidden');
+          tabClassification.classList.remove('active');
+          tabStructure.classList.add('active');
+        } else {
+          classificationPanel.classList.remove('hidden');
+          structurePanel.classList.add('hidden');
+          tabClassification.classList.add('active');
+          tabStructure.classList.remove('active');
+        }
       }
 
       function setExample(sequence) {
@@ -560,7 +741,34 @@ def index() -> str:
         document.getElementById('seq').value = '';
         document.getElementById('summary').innerHTML = '';
         document.getElementById('matrix').innerHTML = '';
+        document.getElementById('structure-summary').innerHTML = 'No structure prediction yet.';
+        document.getElementById('structure-traits').innerHTML = '';
+        document.getElementById('download-pdb').disabled = true;
+        latestPdbText = null;
         setStatus('Cleared.');
+      }
+
+      function renderTraitGrid(traits) {
+        const traitRows = [
+          ['Analysis source', traits.analysis_source || 'unknown'],
+          ['Length', traits.length ?? 'n/a'],
+          ['Molecular weight', traits.molecular_weight ? `${traits.molecular_weight} Da` : 'n/a'],
+          ['Isoelectric point (pI)', traits.isoelectric_point ?? 'n/a'],
+          ['Instability index', traits.instability_index ?? 'n/a'],
+          ['Estimated stability', traits.estimated_stability ?? 'n/a'],
+          ['Hydrophobic fraction', traits.hydrophobic_fraction ?? 'n/a'],
+          ['Likely membrane associated', traits.likely_membrane_associated ?? 'n/a'],
+          ['Charge bias', traits.charge_bias ?? 'n/a'],
+          ['GRAVY', traits.gravy ?? 'n/a']
+        ];
+        return traitRows
+          .map(([label, value]) => `
+            <div class="trait-item">
+              <span class="trait-label">${label}</span>
+              <span class="trait-value">${value}</span>
+            </div>
+          `)
+          .join('');
       }
 
       function scoreColor(score) {
@@ -640,26 +848,7 @@ def index() -> str:
         }
 
         const traits = data.protein_traits || {};
-        const traitRows = [
-          ['Analysis source', traits.analysis_source || 'unknown'],
-          ['Length', traits.length ?? 'n/a'],
-          ['Molecular weight', traits.molecular_weight ? `${traits.molecular_weight} Da` : 'n/a'],
-          ['Isoelectric point (pI)', traits.isoelectric_point ?? 'n/a'],
-          ['Instability index', traits.instability_index ?? 'n/a'],
-          ['Estimated stability', traits.estimated_stability ?? 'n/a'],
-          ['Hydrophobic fraction', traits.hydrophobic_fraction ?? 'n/a'],
-          ['Likely membrane associated', traits.likely_membrane_associated ?? 'n/a'],
-          ['Charge bias', traits.charge_bias ?? 'n/a'],
-          ['GRAVY', traits.gravy ?? 'n/a']
-        ];
-        const traitBlock = traitRows
-          .map(([label, value]) => `
-            <div class="trait-item">
-              <span class="trait-label">${label}</span>
-              <span class="trait-value">${value}</span>
-            </div>
-          `)
-          .join('');
+        const traitBlock = renderTraitGrid(traits);
 
         document.getElementById('summary').innerHTML = `
           <h3>Prediction Summary</h3>
@@ -693,6 +882,86 @@ def index() -> str:
         document.getElementById('matrix').innerHTML = html;
         const elapsedMs = Math.round(performance.now() - start);
         setStatus(`Prediction complete in ${elapsedMs} ms.`);
+      }
+
+      async function runStructurePrediction() {
+        const sequence = document.getElementById('seq').value.trim();
+        if (!sequence) {
+          setStatus('Enter a sequence to predict.');
+          return;
+        }
+
+        setTab('structure');
+        setStatus('Running ESMFold structure prediction...');
+        const start = performance.now();
+
+        try {
+          const res = await fetch('/predict_structure', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ sequence })
+          });
+
+          if (!res.ok) {
+            let detail = 'Structure prediction failed.';
+            try {
+              const err = await res.json();
+              if (err && err.detail) detail = err.detail;
+            } catch (_) {
+              // Ignore parse failures.
+            }
+            document.getElementById('structure-summary').innerHTML = `<p class="muted">${detail}</p>`;
+            setStatus(detail);
+            return;
+          }
+
+          const data = await res.json();
+          latestPdbText = data.pdb_text || null;
+          document.getElementById('download-pdb').disabled = !latestPdbText;
+
+          const summary = data.summary || {};
+          const summaryHtml = `
+            <div class="trait-grid">
+              <div class="trait-item"><span class="trait-label">Model</span><span class="trait-value">${data.model}</span></div>
+              <div class="trait-item"><span class="trait-label">Device</span><span class="trait-value">${data.device}</span></div>
+              <div class="trait-item"><span class="trait-label">Sequence length</span><span class="trait-value">${data.sequence_length}</span></div>
+              <div class="trait-item"><span class="trait-label">Residues in PDB</span><span class="trait-value">${summary.residue_count ?? 'n/a'}</span></div>
+              <div class="trait-item"><span class="trait-label">Atom count</span><span class="trait-value">${summary.atom_count ?? 'n/a'}</span></div>
+              <div class="trait-item"><span class="trait-label">Mean pLDDT</span><span class="trait-value">${summary.mean_plddt ?? 'n/a'}</span></div>
+            </div>
+          `;
+          document.getElementById('structure-summary').innerHTML = summaryHtml;
+
+          const traitBlock = renderTraitGrid(data.protein_traits || {});
+          document.getElementById('structure-traits').innerHTML = `
+            <h3>Structure-Context Traits</h3>
+            <div class="trait-grid">${traitBlock}</div>
+          `;
+
+          const elapsedMs = Math.round(performance.now() - start);
+          setStatus(`Structure prediction complete in ${elapsedMs} ms.`);
+        } catch (err) {
+          const msg = 'Structure prediction failed: could not reach backend.';
+          document.getElementById('structure-summary').innerHTML = `<p class="muted">${msg}</p>`;
+          setStatus(msg);
+        }
+      }
+
+      function downloadPdb() {
+        if (!latestPdbText) {
+          setStatus('No PDB available to download.');
+          return;
+        }
+
+        const blob = new Blob([latestPdbText], { type: 'chemical/x-pdb' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'esmfold_prediction.pdb';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
       }
 
       document.getElementById('seq').addEventListener('keydown', (e) => {

@@ -9,6 +9,21 @@ import api.main as main
 from ml.protein_tokenizer import ProteinTokenizer
 
 
+class FakeStructurePredictor:
+    device = "cpu"
+
+    def predict_pdb(self, sequence: str) -> str:
+        return "\n".join(
+            [
+                "ATOM      1  N   MET A   1      11.104  13.207  12.011  1.00 90.00           N",
+                "ATOM      2  CA  MET A   1      12.560  13.507  12.011  1.00 88.50           C",
+                "ATOM      3  N   LYS A   2      13.104  14.207  13.011  1.00 70.00           N",
+                "ATOM      4  CA  LYS A   2      14.560  14.507  13.011  1.00 72.40           C",
+                "END",
+            ]
+        )
+
+
 def make_bundle() -> SimpleNamespace:
     tokenizer = ProteinTokenizer(max_length=128)
     type_label_map = {int(key): value for key, value in json.loads(main.TYPE_LABEL_MAP_PATH.read_text(encoding="utf-8")).items()}
@@ -35,6 +50,7 @@ def make_bundle() -> SimpleNamespace:
 def test_health_and_meta(monkeypatch) -> None:
     bundle = make_bundle()
     monkeypatch.setattr(main, "get_model_bundle", lambda: bundle)
+    monkeypatch.setattr(main, "get_structure_predictor", lambda: FakeStructurePredictor())
 
     with TestClient(main.app) as client:
         health = client.get("/health")
@@ -45,6 +61,7 @@ def test_health_and_meta(monkeypatch) -> None:
     assert meta.status_code == 200
     assert meta.json()["model_source"] == "test_bundle"
     assert meta.json()["protein_type_model"] is True
+    assert meta.json()["structure_prediction_available"] is True
 
 
 def test_predict_returns_probability_payload(monkeypatch) -> None:
@@ -63,3 +80,23 @@ def test_predict_returns_probability_payload(monkeypatch) -> None:
     assert len(payload["class_probabilities"]) == len(main.LABEL_MAP)
     assert abs(sum(payload["class_probabilities"].values()) - 1.0) < 1e-5
     assert len(payload["blosum_matrix"]["residues"]) > 0
+
+
+def test_predict_structure_returns_pdb_summary(monkeypatch) -> None:
+    bundle = make_bundle()
+    monkeypatch.setattr(main, "get_model_bundle", lambda: bundle)
+    monkeypatch.setattr(main, "get_structure_predictor", lambda: FakeStructurePredictor())
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/predict_structure",
+            json={"sequence": "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPIL"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model"] == "esmfold_v1"
+    assert payload["summary"]["residue_count"] == 2
+    assert payload["summary"]["chain_count"] == 1
+    assert payload["summary"]["mean_plddt"] is not None
+    assert "pdb_text" in payload and payload["pdb_text"]

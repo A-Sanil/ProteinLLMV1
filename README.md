@@ -1,6 +1,6 @@
 # ProteinLLMV1
 
-ProteinLLMV1 is an end-to-end protein sequence classification project built with PyTorch and FastAPI. The current system provides organism classification, baseline protein-type classification, and BLOSUM62 visualization through a local web demo and REST API.
+ProteinLLMV1 is an end-to-end protein sequence analysis project built with PyTorch and FastAPI. The system provides organism classification, baseline protein-type classification, protein trait estimation, and ESMFold-based structure prediction through a local web demo and REST API.
 
 ## Project Overview
 
@@ -15,6 +15,8 @@ Current prediction tasks:
 
 - Organism classification: human, yeast, and E. coli.
 - Protein-type baseline classification from Human Protein Atlas labels.
+- Sequence-derived protein trait analysis (ProtParam + heuristic fallback).
+- ESMFold structure prediction with PDB summary metrics.
 - BLOSUM62 substitution matrix generation for input sequence residues.
 
 ## Key Results
@@ -95,7 +97,8 @@ docker run --rm -p 8000:8000 proteinllmv1
 - `GET /` interactive HTML demo
 - `GET /health` service health status
 - `GET /api/meta` model/runtime metadata
-- `POST /predict` organism + protein-type predictions and BLOSUM matrix
+- `POST /predict` organism + protein-type + trait predictions and BLOSUM matrix
+- `POST /predict_structure` ESMFold structure prediction with PDB summary and downloadable PDB text
 
 Example request:
 
@@ -104,6 +107,32 @@ curl -X POST http://127.0.0.1:8000/predict \
 	-H "Content-Type: application/json" \
 	-d '{"sequence":"MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPIL"}'
 ```
+
+ESMFold structure request example:
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict_structure \
+	-H "Content-Type: application/json" \
+	-d '{"sequence":"MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPIL"}'
+```
+
+## Structure + Traits UI
+
+The web app includes two tabs:
+
+- `Classification + Traits`: organism/protein-type predictions plus trait panel.
+- `Structure + Traits`: runs ESMFold, shows structure summary (residue count, chain count, pLDDT summary), and allows PDB download.
+
+If ESMFold dependencies are unavailable, the API returns a clear `503` message from `/predict_structure`.
+
+To enable ESMFold in your environment, install compatible dependencies in your backend environment:
+
+```bash
+cd backend
+pip install fair-esm
+```
+
+Depending on your platform, you may also need a compatible PyTorch build (CPU or CUDA) for ESMFold weights to load correctly.
 
 ## Continuous Integration
 
