@@ -121,7 +121,9 @@ curl -X POST http://127.0.0.1:8000/predict_structure \
 The web app includes two tabs:
 
 - `Classification + Traits`: organism/protein-type predictions plus trait panel.
-- `Structure + Traits`: runs ESMFold, shows structure summary (residue count, chain count, pLDDT summary), and allows PDB download.
+- `Structure + Traits`: runs ESMFold, shows structure summary (residue count, chain count, pLDDT summary), renders an interactive 3D structure viewer, and allows PDB download.
+
+The embedded 3D viewer supports style switching (`cartoon`, `sticks`, `surface`), spin toggle, and camera reset directly in-browser.
 
 If ESMFold dependencies are unavailable, the API returns a clear `503` message from `/predict_structure`.
 
@@ -133,6 +135,8 @@ pip install fair-esm
 ```
 
 Depending on your platform, you may also need a compatible PyTorch build (CPU or CUDA) for ESMFold weights to load correctly.
+
+Note: the browser viewer is loaded from a CDN (`3Dmol.js`), so internet access is required for in-page 3D rendering.
 
 ## Continuous Integration
 

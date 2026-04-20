@@ -493,6 +493,7 @@ def index() -> str:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ProteinLLMV1 Demo</title>
+    <script src="https://unpkg.com/3dmol@2.4.2/build/3Dmol-min.js"></script>
     <style>
       :root {
         --bg: #07111f;
@@ -608,10 +609,35 @@ def index() -> str:
         border-color: transparent;
       }
       .hidden { display: none; }
+      .viewer-shell {
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 16px;
+        background: rgba(2, 6, 23, 0.7);
+        overflow: hidden;
+      }
+      .viewer-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 10px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+        background: rgba(15, 23, 42, 0.85);
+      }
+      .viewer-controls button {
+        padding: 8px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+      #structure-viewer {
+        width: 100%;
+        height: 420px;
+        background: #020617;
+      }
       @media (max-width: 860px) {
         .hero, .grid { grid-template-columns: 1fr; }
         .stat-grid { grid-template-columns: 1fr; }
         .trait-grid { grid-template-columns: 1fr; }
+        #structure-viewer { height: 320px; }
       }
     </style>
   </head>
@@ -698,6 +724,16 @@ def index() -> str:
           <button onclick="runStructurePrediction()">Run ESMFold</button>
           <button id="download-pdb" class="secondary" onclick="downloadPdb()" disabled>Download PDB</button>
         </div>
+        <div class="viewer-shell" style="margin-top: 14px;">
+          <div class="viewer-controls">
+            <button class="secondary" onclick="setViewerStyle('cartoon')">Cartoon</button>
+            <button class="secondary" onclick="setViewerStyle('stick')">Sticks</button>
+            <button class="secondary" onclick="setViewerStyle('surface')">Surface</button>
+            <button class="secondary" onclick="toggleViewerSpin()">Spin</button>
+            <button class="secondary" onclick="resetViewerCamera()">Reset View</button>
+          </div>
+          <div id="structure-viewer"></div>
+        </div>
         <div id="structure-summary" class="muted" style="margin-top:10px;">No structure prediction yet.</div>
         <div id="structure-traits" style="margin-top: 14px;"></div>
       </div>
@@ -707,6 +743,9 @@ def index() -> str:
       let predictTimer = null;
       let currentTab = 'classification';
       let latestPdbText = null;
+      let structureViewer = null;
+      let viewerSpinEnabled = false;
+      let viewerStyle = 'cartoon';
 
       function setStatus(text) {
         document.getElementById('status').textContent = text;
@@ -745,7 +784,88 @@ def index() -> str:
         document.getElementById('structure-traits').innerHTML = '';
         document.getElementById('download-pdb').disabled = true;
         latestPdbText = null;
+        clearStructureViewer();
         setStatus('Cleared.');
+      }
+
+      function getStructureViewer() {
+        const element = document.getElementById('structure-viewer');
+        if (!element) {
+          return null;
+        }
+
+        if (!window.$3Dmol) {
+          element.innerHTML = '<p class="muted" style="padding:12px;">3Dmol failed to load. Check network access and refresh.</p>';
+          return null;
+        }
+
+        if (!structureViewer) {
+          structureViewer = window.$3Dmol.createViewer(element, {
+            backgroundColor: '#020617'
+          });
+        }
+        return structureViewer;
+      }
+
+      function applyViewerStyle() {
+        if (!latestPdbText) {
+          return;
+        }
+        renderPdbInViewer(latestPdbText);
+      }
+
+      function renderPdbInViewer(pdbText) {
+        const viewer = getStructureViewer();
+        if (!viewer) {
+          return;
+        }
+
+        viewer.clear();
+        viewer.addModel(pdbText, 'pdb');
+
+        if (viewerStyle === 'stick') {
+          viewer.setStyle({}, { stick: { radius: 0.17, colorscheme: 'chain' } });
+        } else if (viewerStyle === 'surface') {
+          viewer.setStyle({}, { cartoon: { color: 'spectrum' } });
+          viewer.addSurface(window.$3Dmol.SurfaceType.VDW, {
+            opacity: 0.72,
+            color: 'white'
+          });
+        } else {
+          viewer.setStyle({}, { cartoon: { color: 'spectrum' } });
+        }
+
+        viewer.zoomTo();
+        viewer.spin(viewerSpinEnabled);
+        viewer.render();
+      }
+
+      function clearStructureViewer() {
+        if (structureViewer) {
+          structureViewer.clear();
+          structureViewer.render();
+        }
+      }
+
+      function setViewerStyle(nextStyle) {
+        viewerStyle = nextStyle;
+        applyViewerStyle();
+      }
+
+      function toggleViewerSpin() {
+        viewerSpinEnabled = !viewerSpinEnabled;
+        if (structureViewer) {
+          structureViewer.spin(viewerSpinEnabled);
+          structureViewer.render();
+        }
+      }
+
+      function resetViewerCamera() {
+        if (!structureViewer) {
+          return;
+        }
+        structureViewer.zoomTo();
+        structureViewer.render();
       }
 
       function renderTraitGrid(traits) {
@@ -918,6 +1038,11 @@ def index() -> str:
           const data = await res.json();
           latestPdbText = data.pdb_text || null;
           document.getElementById('download-pdb').disabled = !latestPdbText;
+          if (latestPdbText) {
+            renderPdbInViewer(latestPdbText);
+          } else {
+            clearStructureViewer();
+          }
 
           const summary = data.summary || {};
           const summaryHtml = `
@@ -943,6 +1068,7 @@ def index() -> str:
         } catch (err) {
           const msg = 'Structure prediction failed: could not reach backend.';
           document.getElementById('structure-summary').innerHTML = `<p class="muted">${msg}</p>`;
+          clearStructureViewer();
           setStatus(msg);
         }
       }
