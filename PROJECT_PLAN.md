@@ -1,7 +1,57 @@
 # ProteinLLMV1 - Project Plan
 
 ## 🎯 Project Overview
-Build a protein language model based on nanoGPT architecture to predict protein functions. The system will feature a web-based UI/UX with backend running locally on laptop, utilizing publicly available protein datasets and pre-trained transformers like ESMFold.
+Build a recruiter-ready protein AI demo that feels like a real product: sequence input, model inference, interpretation, and a polished web experience. The goal is to showcase both AI/ML depth and SWE execution, not just a training script.
+
+## What Makes This Strong for Recruiting
+
+- End-to-end pipeline: raw data, preprocessing, model training, inference, API, and UI.
+- Clear technical story: protein tokenization, transformer-based modeling, and evaluation metrics.
+- Production signals: health endpoints, typed schemas, tests, repeatable setup, and deployable packaging.
+- Demoability: a single URL or local server should communicate the project within 2 minutes.
+
+## Priority Order
+
+1. Make the current demo look and feel polished.
+2. Add test coverage and service health checks.
+3. Document evaluation and limitations honestly.
+4. Add optional frontend and deployment polish if time remains.
+
+## Implementation Plan For Items 1 and 2
+
+### 1. Test Coverage and Service Checks
+
+Goal: make the project easier to trust, easier to change, and more credible for SWE recruiting.
+
+Steps:
+1. Add unit tests for the tokenizer to confirm sequence cleaning, encoding, padding, and unknown-character handling.
+2. Add model-level tests that verify tensor shapes, batch inference behavior, and output probability properties.
+3. Add API tests for `/health`, `/api/meta`, and `/predict` so the service contract is locked down.
+4. Add a small fixture set of sequences and expected labels/properties so future changes are reproducible.
+5. Run the test suite locally and fix any failures before moving to packaging work.
+
+Acceptance criteria:
+- Tests run from a single command.
+- Basic inference and API behavior are covered.
+- Failures are informative enough for someone else to debug quickly.
+
+### 2. Docker and CI
+
+Goal: make the repo look deployable and professional to recruiters and hiring managers.
+
+Steps:
+1. Add a backend Dockerfile that installs dependencies, exposes the FastAPI app, and starts the service consistently.
+2. Add a `.dockerignore` so the image stays small and does not include data, checkpoints, or caches unnecessarily.
+3. Add a GitHub Actions workflow that installs dependencies and runs the test suite on pull requests and pushes.
+4. Add a short deployment note in the README with the exact local and container run commands.
+5. Verify the container starts cleanly and the CI workflow passes before pushing.
+
+Acceptance criteria:
+- The app can run locally and in a container.
+- CI fails on broken tests and passes on the current baseline.
+- A recruiter can see that the project is reproducible and maintained.
+
+If you approve this plan, I will implement it in this order: tests first, then Docker, then CI, then a final validation pass, and finally I can prepare the push to GitHub.
 
 ---
 

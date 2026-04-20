@@ -81,6 +81,9 @@ tmp/
 temp/
 *.tmp
 
+# Planning docs that should stay local
+PROJECT_PLAN.md
+
 # SQLite
 *.db
 *.sqlite
