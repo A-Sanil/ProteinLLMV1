@@ -27,6 +27,11 @@ except Exception:
         RuntimeWarning,
     )
 
+try:
+  from Bio.SeqUtils.ProtParam import ProteinAnalysis
+except Exception:
+  ProteinAnalysis = None
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATH = BACKEND_DIR / "checkpoints" / "public_small" / "basic_protein_classifier.pt"
@@ -35,6 +40,10 @@ TYPE_LABEL_MAP_PATH = BACKEND_DIR / "data" / "processed" / "protein_type_label_m
 LABEL_MAP = {0: "human_swissprot", 1: "yeast_swissprot", 2: "ecoli_swissprot"}
 APP_TITLE = "ProteinLLMV1 Demo"
 MAX_BLOSUM_DISPLAY_RESIDUES = 80
+HYDROPHOBIC_AA = set("AILMFWVY")
+AROMATIC_AA = set("FWY")
+POSITIVE_AA = set("KRH")
+NEGATIVE_AA = set("DE")
 
 
 class PredictRequest(BaseModel):
@@ -231,12 +240,83 @@ def build_blosum_matrix(sequence: str, max_residues: int = MAX_BLOSUM_DISPLAY_RE
         scores.append(row)
 
     return {
-      "residues": residues,
-      "scores": scores,
-      "full_length": full_length,
-      "displayed_length": len(residues),
-      "truncated": full_length > len(residues),
+        "residues": residues,
+        "scores": scores,
+        "full_length": full_length,
+        "displayed_length": len(residues),
+        "truncated": full_length > len(residues),
     }
+
+
+def _safe_round(value: float, digits: int = 4) -> float:
+    return float(round(float(value), digits))
+
+
+def compute_protein_traits(sequence: str) -> Dict[str, object]:
+    if not sequence:
+        return {
+            "analysis_source": "none",
+            "length": 0,
+            "message": "No amino acid sequence available.",
+        }
+
+    length = len(sequence)
+    aa_counts = {aa: sequence.count(aa) for aa in sorted(set(sequence))}
+    aa_fraction = {aa: _safe_round(count / length) for aa, count in aa_counts.items()}
+
+    hydrophobic_fraction = _safe_round(sum(sequence.count(aa) for aa in HYDROPHOBIC_AA) / length)
+    aromatic_fraction = _safe_round(sum(sequence.count(aa) for aa in AROMATIC_AA) / length)
+    positive_fraction = _safe_round(sum(sequence.count(aa) for aa in POSITIVE_AA) / length)
+    negative_fraction = _safe_round(sum(sequence.count(aa) for aa in NEGATIVE_AA) / length)
+
+    likely_membrane_associated = hydrophobic_fraction >= 0.36
+    charge_bias = "positive" if positive_fraction > negative_fraction else "negative"
+    if positive_fraction == negative_fraction:
+        charge_bias = "neutral"
+
+    traits: Dict[str, object] = {
+        "analysis_source": "heuristic",
+        "length": length,
+        "amino_acid_fraction": aa_fraction,
+        "hydrophobic_fraction": hydrophobic_fraction,
+        "aromatic_fraction": aromatic_fraction,
+        "charged_positive_fraction": positive_fraction,
+        "charged_negative_fraction": negative_fraction,
+        "charge_bias": charge_bias,
+        "likely_membrane_associated": likely_membrane_associated,
+        "trait_notes": [
+            "Membrane association is a sequence-composition heuristic.",
+            "These values are not structure-level predictions like AlphaFold3.",
+        ],
+    }
+
+    if ProteinAnalysis is None:
+        return traits
+
+    try:
+        analyzer = ProteinAnalysis(sequence)
+        helix, turn, sheet = analyzer.secondary_structure_fraction()
+        traits.update(
+            {
+                "analysis_source": "biopython_protparam",
+                "molecular_weight": _safe_round(analyzer.molecular_weight(), 2),
+                "isoelectric_point": _safe_round(analyzer.isoelectric_point()),
+                "aromaticity": _safe_round(analyzer.aromaticity()),
+                "instability_index": _safe_round(analyzer.instability_index(), 2),
+                "gravy": _safe_round(analyzer.gravy()),
+                "secondary_structure_fraction": {
+                    "helix": _safe_round(helix),
+                    "turn": _safe_round(turn),
+                    "sheet": _safe_round(sheet),
+                },
+                "estimated_stability": "stable" if analyzer.instability_index() < 40 else "unstable",
+            }
+        )
+    except Exception:
+        # Keep heuristic traits if ProtParam cannot analyze this sequence.
+        pass
+
+    return traits
 
 
 app = FastAPI(title=APP_TITLE)
@@ -271,6 +351,7 @@ def api_meta() -> Dict[str, object]:
         "features": [
             "organism_classification",
             "protein_type_baseline",
+      "protein_trait_analysis",
             "blosum62_visualization",
             "fastapi_inference",
         ],
@@ -344,6 +425,10 @@ def index() -> str:
       .card h2, .card h3 { margin: 0 0 12px; }
       .muted { color: var(--muted); font-size: 13px; line-height: 1.55; }
       .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+      .trait-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+      .trait-item { border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 12px; padding: 10px; background: rgba(15, 23, 42, 0.6); }
+      .trait-label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+      .trait-value { display: block; margin-top: 6px; font-weight: 700; font-size: 14px; word-break: break-word; }
       .chip {
         border: 1px solid var(--panel-border);
         border-radius: 999px;
@@ -385,6 +470,7 @@ def index() -> str:
       @media (max-width: 860px) {
         .hero, .grid { grid-template-columns: 1fr; }
         .stat-grid { grid-template-columns: 1fr; }
+        .trait-grid { grid-template-columns: 1fr; }
       }
     </style>
   </head>
@@ -553,12 +639,36 @@ def index() -> str:
           `;
         }
 
+        const traits = data.protein_traits || {};
+        const traitRows = [
+          ['Analysis source', traits.analysis_source || 'unknown'],
+          ['Length', traits.length ?? 'n/a'],
+          ['Molecular weight', traits.molecular_weight ? `${traits.molecular_weight} Da` : 'n/a'],
+          ['Isoelectric point (pI)', traits.isoelectric_point ?? 'n/a'],
+          ['Instability index', traits.instability_index ?? 'n/a'],
+          ['Estimated stability', traits.estimated_stability ?? 'n/a'],
+          ['Hydrophobic fraction', traits.hydrophobic_fraction ?? 'n/a'],
+          ['Likely membrane associated', traits.likely_membrane_associated ?? 'n/a'],
+          ['Charge bias', traits.charge_bias ?? 'n/a'],
+          ['GRAVY', traits.gravy ?? 'n/a']
+        ];
+        const traitBlock = traitRows
+          .map(([label, value]) => `
+            <div class="trait-item">
+              <span class="trait-label">${label}</span>
+              <span class="trait-value">${value}</span>
+            </div>
+          `)
+          .join('');
+
         document.getElementById('summary').innerHTML = `
           <h3>Prediction Summary</h3>
           <p><b>Organism Class:</b> ${data.predicted_label}</p>
           <p><b>Organism Confidence:</b> ${(data.confidence * 100).toFixed(2)}%</p>
           <ul>${probs}</ul>
           ${typeBlock}
+          <h3>Protein Traits</h3>
+          <div class="trait-grid">${traitBlock}</div>
         `;
 
         const residues = data.blosum_matrix.residues;
@@ -650,5 +760,6 @@ def predict(payload: PredictRequest):
         "confidence": float(probs[pred_idx].item()),
         "class_probabilities": class_probs,
         "protein_type_prediction": protein_type_prediction,
+      "protein_traits": compute_protein_traits(cleaned_sequence),
         "blosum_matrix": build_blosum_matrix(sequence),
     }
